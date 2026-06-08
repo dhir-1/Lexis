@@ -1,0 +1,9 @@
+# Step 2 additions
+backend/.env
+backend/data/
+backend/models/
+
+# Ignore PRD documents
+PRD_STEP1.md
+PRD_STEP2.md
+PRD_STEP3.md

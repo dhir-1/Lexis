@@ -1,0 +1,12 @@
+# Backend runtime and training dependencies
+joblib==1.5.3
+mediapipe==0.10.21
+numpy==1.26.4
+opencv-contrib-python==4.11.0.86
+pandas==3.0.3
+psycopg2-binary==2.9.12
+python-dotenv==1.2.2
+scikit-learn==1.9.0
+scipy==1.17.1
+sounddevice==0.5.5
+faster-whisper==1.2.1
