@@ -8,8 +8,11 @@ from pathlib import Path
 import numpy as np
 import scipy.io.wavfile as wav
 import sounddevice as sd
+from dotenv import load_dotenv
 
 from database import log_async
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMP_AUDIO_PATH = BASE_DIR / "temp_audio.wav"
@@ -31,35 +34,66 @@ HALLUCINATION_FILTER = {
 }
 
 LANGUAGE_LABELS = {
-    "ar": "arabic",
-    "bn": "bengali",
-    "en": "english",
-    "es": "spanish",
-    "fr": "french",
-    "de": "german",
-    "gu": "gujarati",
-    "hi": "hindi",
-    "it": "italian",
-    "ja": "japanese",
-    "ko": "korean",
-    "mr": "marathi",
-    "ne": "nepali",
-    "pa": "punjabi",
-    "pt": "portuguese",
-    "ru": "russian",
-    "ta": "tamil",
-    "te": "telugu",
-    "ur": "urdu",
-    "zh": "chinese",
+    "ar": "Arabic",
+    "bn": "Bengali",
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "pa": "Punjabi",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ur": "Urdu",
+    "zh": "Chinese",
 }
+
+latest_audio_event: dict[str, object] = {
+    "raw_text": "",
+    "translated_text": "",
+    "detected_language": "en",
+    "language_label": "English",
+    "timestamp": 0.0,
+}
+_audio_lock = threading.Lock()
+
+
+def _set_audio_state(raw: str, translated: str, lang: str) -> None:
+    global latest_audio_event
+    with _audio_lock:
+        latest_audio_event = {
+            "raw_text": raw,
+            "translated_text": translated,
+            "detected_language": lang,
+            "language_label": LANGUAGE_LABELS.get(lang.lower(), lang.capitalize()),
+            "timestamp": time.monotonic(),
+        }
+
+
+def get_latest_audio_event() -> dict[str, object]:
+    with _audio_lock:
+        return dict(latest_audio_event)
+
 
 # ── Groq client setup ────────────────────────────────────────────────────────
 
+groq_key = os.getenv("GROQ_API_KEY", "").strip()
 try:
     from groq import Groq
-    _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    GROQ_AVAILABLE = True
-    print("[AUDIO]: Groq client initialized.")
+    _groq_client = Groq(api_key=groq_key)
+    GROQ_AVAILABLE = bool(groq_key)
+    if GROQ_AVAILABLE:
+        print("[AUDIO]: Groq client ready (Whisper-large-v3-turbo + LLaMA-3.1-8B-Instant).")
+    else:
+        print("[AUDIO]: Groq API key missing. Will fall back to local transcription.")
 except Exception as exc:
     _groq_client = None
     GROQ_AVAILABLE = False
@@ -85,28 +119,21 @@ def _clean_text(text: str) -> str:
 
 def _is_hallucination(text: str) -> bool:
     cleaned = _clean_text(text).lower()
-    if not cleaned:
-        return True
-    if len(cleaned) <= 1:
-        return True
-    if cleaned in HALLUCINATION_FILTER:
+    if not cleaned or len(cleaned) <= 1 or cleaned in HALLUCINATION_FILTER:
         return True
     return False
 
 
 def _language_label(language: str | None) -> str:
     if not language:
-        return "unknown"
-    return LANGUAGE_LABELS.get(language.lower(), language.lower())
+        return "Unknown"
+    return LANGUAGE_LABELS.get(language.lower(), language.capitalize())
 
 
-# ── Groq transcription ───────────────────────────────────────────────────────
+# ── Groq transcription & LLM Translation ────────────────────────────────────
 
 def _transcribe_groq(wav_path: Path) -> tuple[str, str]:
-    """
-    Returns (transcript, detected_language).
-    Uses verbose_json so language detection is free — no extra API call.
-    """
+    """Transcribes audio and auto-detects language using Whisper Large V3 Turbo."""
     with open(wav_path, "rb") as f:
         result = _groq_client.audio.transcriptions.create(
             file=(wav_path.name, f.read()),
@@ -119,29 +146,26 @@ def _transcribe_groq(wav_path: Path) -> tuple[str, str]:
     return transcript, detected_language
 
 
-# ── Groq translation ─────────────────────────────────────────────────────────
-
 def _translate_groq(text: str, from_language: str) -> str:
-    """
-    Translates to English using LLaMA 8B instant.
-    Only called when detected language is not English — saves tokens.
-    """
-    if from_language == "en":
+    """Translates non-English speech into English subtitles using ultra-fast LLaMA-3.1-8B-Instant."""
+    if from_language.lower() == "en":
         return text
 
+    source_name = _language_label(from_language)
     response = _groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
             {
                 "role": "system",
-                "content": "Translate the user's message to English. Reply with the translation only. No explanations, no notes."
+                "content": f"You are a real-time subtitle translator. Translate the following {source_name} spoken speech directly into fluent English subtitles. Output only the English translation with no quotes or extra commentary.",
             },
             {
                 "role": "user",
-                "content": text
+                "content": text,
             }
         ],
-        max_tokens=200,
+        max_tokens=150,
+        temperature=0.1,
     )
     return _clean_text(response.choices[0].message.content)
 
@@ -177,7 +201,7 @@ def _translate_fallback(model, wav_path: Path, detected_language: str) -> str:
     return _clean_text(" ".join(seg.text for seg in segments))
 
 
-# ── Main loop ────────────────────────────────────────────────────────────────
+# ── Main Audio Worker Loop ───────────────────────────────────────────────────
 
 def record_and_translate():
     if not ENABLE_AUDIO:
@@ -193,7 +217,6 @@ def record_and_translate():
 
     while True:
         try:
-            print(f"[AUDIO]: Recording {CHUNK_SECONDS}s chunk...")
             audio = sd.rec(
                 int(CHUNK_SECONDS * SAMPLE_RATE),
                 samplerate=SAMPLE_RATE,
@@ -202,41 +225,36 @@ def record_and_translate():
             )
             sd.wait()
 
-            # Skip silent chunks before any API call
+            # Silence rejection: avoid unnecessary API calls
             rms = float(np.sqrt(np.mean(np.square(audio))))
             if rms < RMS_SILENCE_THRESHOLD:
-                print("[AUDIO]: Silence detected, skipping.")
                 continue
 
             wav.write(TEMP_AUDIO_PATH, SAMPLE_RATE, (audio * 32767).astype(np.int16))
 
-            # ── Groq path ────────────────────────────────────────────────────
+            # ── Groq Accelerated Path ────────────────────────────────────────
             if GROQ_AVAILABLE:
                 raw_text, detected_language = _transcribe_groq(TEMP_AUDIO_PATH)
 
                 if _is_hallucination(raw_text):
-                    print("[AUDIO]: Hallucination detected, skipping.")
                     continue
 
-                # English → no translation call at all
-                if detected_language == "en":
+                if detected_language.lower() == "en":
                     translated_text = raw_text
                 else:
                     translated_text = _translate_groq(raw_text, detected_language)
 
                 if _is_hallucination(translated_text):
-                    print("[AUDIO]: Hallucination in translation, skipping.")
                     continue
 
-            # ── Fallback path ────────────────────────────────────────────────
+            # ── Fallback Local Path ──────────────────────────────────────────
             else:
                 raw_text, detected_language = _transcribe_fallback(fallback_model, TEMP_AUDIO_PATH)
 
                 if _is_hallucination(raw_text):
-                    print("[AUDIO]: Hallucination detected, skipping.")
                     continue
 
-                if detected_language == "en":
+                if detected_language.lower() == "en":
                     translated_text = raw_text
                 else:
                     translated_text = _translate_fallback(
@@ -244,11 +262,15 @@ def record_and_translate():
                     ) or raw_text
 
                 if _is_hallucination(translated_text):
-                    print("[AUDIO]: Hallucination in translation, skipping.")
                     continue
 
             source_label = _language_label(detected_language)
-            print(f"[AUDIO] ({source_label}): {raw_text} -> [en]: {translated_text}")
+            _set_audio_state(raw_text, translated_text, detected_language)
+
+            if detected_language.lower() == "en":
+                print(f"[AUDIO SPEECH (English)]: \"{translated_text}\"")
+            else:
+                print(f"[AUDIO TRANSLATION ({source_label} -> English)]: \"{raw_text}\" -> \"{translated_text}\"")
 
             log_async(
                 input_type="audio_speech",
@@ -259,7 +281,7 @@ def record_and_translate():
             )
 
         except Exception as exc:
-            print(f"[AUDIO ERROR]: {exc}")
+            print(f"[AUDIO NOTICE]: {exc}")
             time.sleep(1)
 
         finally:
@@ -270,14 +292,14 @@ def record_and_translate():
                     pass
 
 
-# ── Thread entrypoint ────────────────────────────────────────────────────────
+# ── Thread Entrypoint ────────────────────────────────────────────────────────
 
-def start_audio_thread():
+def start_audio_thread() -> bool:
     if not ENABLE_AUDIO:
         print("[AUDIO]: Disabled via ENABLE_AUDIO=0.")
         return False
 
-    thread = threading.Thread(target=record_and_translate, daemon=True)
+    thread = threading.Thread(target=record_and_translate, daemon=True, name="AudioTranslator")
     thread.start()
-    print("[AUDIO]: Background thread started.")
+    print("[AUDIO]: Multi-Language Speech-to-English Subtitle Engine started.")
     return True

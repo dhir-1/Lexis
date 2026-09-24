@@ -1,9 +1,41 @@
-# Step 2 additions
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments & local configuration
+venv/
+backend/venv/
+env/
+.env
 backend/.env
+
+# IDE / Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Heavy local training datasets & raw model binary weights
 backend/data/
 backend/models/
+backend/artifacts/
+artifacts/
+*.npy
+*.pt
+*.onnx
+*.pkl
 
-# Ignore PRD documents
+# Temporary evaluation reports & logs
+*.log
+backend/audit_report.csv
+audit_report.csv
+
+# Agent and internal architecture memory files (omitted from public portfolio)
+AGENTS.md
+GEMINI.md
+LEXIS_SYSTEM_ARCHITECTURE_SUMMARY.md
 PRD_STEP1.md
 PRD_STEP2.md
 PRD_STEP3.md

@@ -3,8 +3,9 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from audio import start_audio_thread
-from vision import get_latest_frame_bytes, start_vision_stream, stop_vision_stream
+# Audio is currently disabled for sign language vision development
+# from audio import start_audio_thread
+from vision import get_latest_event, get_latest_frame_bytes, start_vision_stream, stop_vision_stream
 
 
 def _placeholder_frame(message: str = "Starting camera..."):
@@ -23,9 +24,9 @@ def _placeholder_frame(message: str = "Starting camera..."):
 
 
 def main() -> int:
-    # Start audio first so any model load feedback appears before the webcam window.
-    if not start_audio_thread():
-        print("[AUDIO]: Vision mode will continue without live speech translation.")
+    # Audio thread disabled for now to focus purely on vision
+    # if not start_audio_thread():
+    #     print("[AUDIO]: Vision mode will continue without live speech translation.")
 
     if not start_vision_stream():
         print("[VISION]: Failed to start the local camera stream.")
