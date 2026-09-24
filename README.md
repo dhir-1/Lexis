@@ -1,20 +1,14 @@
-<p align="center">
-  <img src="assets/logo.png" alt="Lexis Logo" width="130" />
-</p>
+# Lexis
 
-<h1 align="center">Lexis</h1>
+### Real-Time Multimodal Continuous ASL Translation & Multilingual Speech Subtitling
 
-<p align="center">
-  <strong>Real-Time Multimodal Continuous ASL Translation & Multilingual Speech Subtitling Platform</strong>
-</p>
-
-<p align="center">
-  <a href="#key-features"><img src="https://img.shields.io/badge/Vision_Tracking-RTMPose_Wholebody-6366F1?style=for-the-badge&logo=opencv&logoColor=white" alt="RTMPose Wholebody"></a>
-  <a href="#key-features"><img src="https://img.shields.io/badge/Audio_Pipeline-Groq_Whisper_V3-8B5CF6?style=for-the-badge&logo=fastapi&logoColor=white" alt="Whisper Large V3"></a>
-  <a href="#key-features"><img src="https://img.shields.io/badge/Deep_Learning-PyTorch_Bi--GRU-EC4899?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch"></a>
-  <a href="#tech-stack"><img src="https://img.shields.io/badge/Database-Neon_PostgreSQL-00E599?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL"></a>
-  <a href="#quickstart"><img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11"></a>
-</p>
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-Computer_Vision-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
+[![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-Inference-005CED?logo=onnx&logoColor=white)](https://onnxruntime.ai/)
+[![Groq](https://img.shields.io/badge/Groq-Whisper_%26_LLaMA-F55036)](https://groq.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon_Cloud-4169E1?logo=postgresql&logoColor=white)](https://neon.tech/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
 
@@ -22,7 +16,7 @@
 
 **Lexis** is an end-to-end multimodal communication and accessibility platform designed to bridge conversational barriers for Deaf, Hard-of-Hearing, and multilingual communities.
 
-By pairing **continuous 3D computer vision**, **ultra-low-latency speech AI**, and **large-scale gesture classification**, Lexis delivers instantaneous visual and acoustic subtitles with zero phantom triggers.
+By combining **continuous 3D computer vision**, **ultra-low-latency speech AI**, and **kinematic gesture classification**, Lexis delivers real-time visual and acoustic subtitles with zero phantom triggers.
 
 ```
                                   ┌──────────────────────────────────────────┐
@@ -85,16 +79,14 @@ By pairing **continuous 3D computer vision**, **ultra-low-latency speech AI**, a
 
 ## 🛠️ Tech Stack
 
-| Layer | Framework / Library | Role |
+| Domain | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Language & Runtime** | Python 3.11 | Core application logic and async streaming |
-| **Pose Estimation** | RTMPose Wholebody, ONNXRuntime | 133-point 3D landmark tracking at 30+ FPS |
-| **Machine Learning** | Scikit-learn, ExtraTrees, Joblib | Instant user sign sequence classifier |
-| **Deep Learning** | PyTorch, Bidirectional GRU | 2,400-Class bounded gesture recognition |
-| **Speech-to-Text** | Whisper Large V3 Turbo (Groq API) | Ultra-low latency spoken language transcription |
-| **SLM Translation** | LLaMA-3.1-8B-Instant (Groq API) | Context-aware natural English subtitle formulation |
-| **Audio & Video I/O** | OpenCV, SoundDevice, NumPy, SciPy | Low-latency camera frame and microphone capture |
-| **Database** | Neon Cloud PostgreSQL, Psycopg2 | Asynchronous non-blocking subtitle transcript storage |
+| **Deep Learning & Pose Estimation** | PyTorch, RTMPose Wholebody, ONNX Runtime | 133-point skeletal landmark tracking at 30+ FPS and 2,400-class Bi-GRU sign recognition |
+| **Statistical Machine Learning** | Scikit-learn, ExtraTrees Ensemble | Real-time user sign sequence classifier ($<0.1\text{ms}$ latency) |
+| **Speech-to-Text & Translation** | Groq Cloud API (Whisper Large V3 Turbo, LLaMA 3.1 8B Instant) | Sub-120ms multilingual speech transcription and natural English translation |
+| **Computer Vision & Audio I/O** | OpenCV, SoundDevice, NumPy, SciPy | Low-latency camera frame decoding, skeletal overlay rendering, and microphone capture |
+| **Database & Persistence** | PostgreSQL (Neon Cloud), Psycopg2 | Non-blocking asynchronous logging of subtitle streams and translation events |
+| **Language & Environment** | Python 3.11 | Core runtime and asynchronous streaming pipeline |
 
 ---
 
@@ -102,25 +94,18 @@ By pairing **continuous 3D computer vision**, **ultra-low-latency speech AI**, a
 
 ```text
 Lexis/
-├── assets/
-│   ├── logo.png                      # Project branding mark (transparent)
-│   ├── logo_dark.png                 # Squircle icon badge
-│   └── favicon.svg                   # Scalable vector icon
 ├── backend/
 │   ├── main.py                       # Live desktop application runner
 │   ├── vision.py                     # Real-time continuous ASL vision pipeline
 │   ├── audio.py                      # Multilingual speech-to-English translation
-│   ├── record_signs.py               # Interactive OpenCV sign recorder with ASL cues
+│   ├── record_signs.py               # Interactive OpenCV sign dataset recorder
 │   ├── train_user_signs.py           # Feature engineering & ExtraTrees trainer
 │   ├── inspect_signs.py              # Visual inspection tool for recorded datasets
 │   ├── database.py                   # Async Neon PostgreSQL persistence layer
 │   ├── requirements.txt              # Production dependency specifications
 │   └── .env.example                  # Environment configuration template
-├── frontend/
-│   ├── favicon.svg                   # Minimal vector favicon
-│   ├── logo_transparent.png          # High-resolution transparent logo
-│   └── logo_dark.png                 # Dark theme icon
 ├── .gitignore                        # Git ignore rules
+├── LICENSE                           # MIT License
 └── README.md                         # Project documentation
 ```
 
