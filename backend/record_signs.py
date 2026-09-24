@@ -45,17 +45,23 @@ VOCABULARY_LIST = [
     # Batch 3 (Next 10 Words: 16-25)
     "i love you", "you", "who", "what", "where", "why", "how", "when", "more", "stop",
 
-    # Remaining Core Signs
+    # Batch 4 (Words 26-35)
     "again", "fine", "happy", "sad", "school", "book", "car", "drive", "work", "play",
-    "friend", "family", "mother", "father", "baby", "brother", "sister", "man", "woman",
 
-    "father", "baby", "brother", "sister", "man", "woman", "teacher", "student", "house", "home",
-    "bathroom", "time", "now", "today", "yesterday", "tomorrow", "day", "night", "morning", "afternoon",
+    # Batch 5 (Words 36-50: People, Places & Essentials)
+    "friend", "family", "mother", "father", "baby", "brother", "sister", "man", "woman",
+    "teacher", "student", "house", "home", "bathroom", "time",
+
+    # Batch 6 (Words 51-75: Time, Food & Commerce)
+    "now", "today", "yesterday", "tomorrow", "day", "night", "morning", "afternoon",
     "coffee", "milk", "tea", "apple", "bread", "cheese", "meat", "pizza", "store", "buy",
-    "money", "pay", "cost", "cheap", "expensive", "big", "small", "hot", "cold", "good",
-    "bad", "beautiful", "tired", "sick", "doctor", "hospital", "medicine", "hurt", "clean", "dirty",
-    "understand", "know", "think", "forget", "remember", "learn", "read", "write", "sign", "language",
-    "walk", "run", "sit", "stand", "go", "come", "see", "hear", "listen", "talk",
+    "money", "pay", "cost", "cheap", "expensive", "big", "small",
+
+    # Batch 7 (Words 76-100: State, Health, Mind & Actions)
+    "hot", "cold", "good", "bad", "beautiful", "tired", "sick", "doctor", "hospital",
+    "medicine", "hurt", "clean", "dirty", "understand", "know", "think", "forget", "remember",
+    "learn", "read", "write", "sign", "language", "walk", "run",
+ "sit", "stand", "go", "come", "see", "hear", "listen", "talk",
     "ask", "answer", "open", "close", "start", "finish", "wait", "meet", "live", "stay",
     "change", "need", "have", "give", "take", "bring", "find", "lose", "feel", "hope",
     "love", "hate", "angry", "scared", "surprised", "bored", "busy", "ready", "same", "different",
@@ -298,11 +304,18 @@ def draw_hand_skeleton(frame, hand_kpts: np.ndarray, scores: np.ndarray, img_w: 
         x = int(hand_kpts[i][0] * img_w)
         y = int(hand_kpts[i][1] * img_h)
         points.append((x, y))
-        if scores[i] > 0.20:
+        if scores[i] > 0.25:
             cv2.circle(frame, (x, y), 4, color, -1)
 
+    max_bone_len = 0.16 * max(img_w, img_h)
     for p1_idx, p2_idx in HAND_CONNECTIONS:
-        if scores[p1_idx] > 0.20 and scores[p2_idx] > 0.20:
+        if scores[p1_idx] > 0.25 and scores[p2_idx] > 0.25:
+            dx = points[p1_idx][0] - points[p2_idx][0]
+            dy = points[p1_idx][1] - points[p2_idx][1]
+            dist = np.hypot(dx, dy)
+            # Skip physically impossible long stretched lines (ghost jumps)
+            if dist > max_bone_len:
+                continue
             cv2.line(frame, points[p1_idx], points[p2_idx], (255, 255, 255), 2, cv2.LINE_AA)
 
 
@@ -386,12 +399,35 @@ def main():
                         norm_kpts[:, 1] = kpts[:, 1] / max(h, 1)
                         norm_kpts[:, 2] = scores
 
-                        # Draw hand skeletons
+                        # Anatomical sanity check on hand landmarks:
+                        # In foreshortened poses (pointing towards camera), if wrist snaps away across chest,
+                        # re-anchor it behind the MCP knuckles so the 45-frame sequence tensor stays clean.
+                        for hand_slice in [RIGHT_HAND_IDX, LEFT_HAND_IDX]:
+                            hwrist = norm_kpts[hand_slice[0], :2]
+                            hmcp = np.mean(norm_kpts[[hand_slice[5], hand_slice[9], hand_slice[13], hand_slice[17]], :2], axis=0)
+                            wrist_dist = float(np.linalg.norm(hwrist - hmcp))
+                            if wrist_dist > 0.18:
+                                norm_kpts[hand_slice[0], :2] = hmcp + np.array([0.0, 0.04], dtype=np.float32)
+
+                        # Draw hand skeletons with ghost hand suppression
                         right_scores = scores[RIGHT_HAND_IDX]
                         left_scores = scores[LEFT_HAND_IDX]
-                        if np.mean(right_scores) > 0.18:
+                        r_mean = float(np.mean(right_scores))
+                        l_mean = float(np.mean(left_scores))
+
+                        # If both hands overlap closely on screen, suppress the weaker ghost duplicate
+                        if r_mean > 0.20 and l_mean > 0.20:
+                            r_center = np.mean(norm_kpts[RIGHT_HAND_IDX, :2], axis=0)
+                            l_center = np.mean(norm_kpts[LEFT_HAND_IDX, :2], axis=0)
+                            if np.linalg.norm(r_center - l_center) < 0.08:
+                                if r_mean > l_mean:
+                                    left_scores = np.zeros_like(left_scores)
+                                else:
+                                    right_scores = np.zeros_like(right_scores)
+
+                        if np.mean(right_scores) > 0.22:
                             draw_hand_skeleton(display_frame, norm_kpts[RIGHT_HAND_IDX], right_scores, w, h, (0, 240, 120))
-                        if np.mean(left_scores) > 0.18:
+                        if np.mean(left_scores) > 0.22:
                             draw_hand_skeleton(display_frame, norm_kpts[LEFT_HAND_IDX], left_scores, w, h, (0, 200, 255))
             except Exception:
                 pass

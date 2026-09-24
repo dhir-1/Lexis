@@ -6,6 +6,10 @@ import sys
 import time
 from pathlib import Path
 
+# Force UTF-8 on Windows consoles
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 import joblib
 import numpy as np
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
@@ -169,10 +173,37 @@ def extract_sequence_features(sequence: np.ndarray) -> np.ndarray:
 
 
 
+def mirror_sequence(seq: np.ndarray) -> np.ndarray:
+    """
+    Horizontally mirror a (T, 133, 3) landmark sequence.
+    Flips X coordinates (1.0 - x) and swaps left/right body & hand landmarks.
+    Produces an ambidextrous left-handed clone of right-handed signs.
+    """
+    flipped = seq.copy()
+    # 1. Flip X coordinates
+    flipped[:, :, 0] = 1.0 - flipped[:, :, 0]
+
+    # 2. Swap bilateral body keypoints
+    body_swap_pairs = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
+    for left_idx, right_idx in body_swap_pairs:
+        tmp = flipped[:, left_idx].copy()
+        flipped[:, left_idx] = flipped[:, right_idx]
+        flipped[:, right_idx] = tmp
+
+    # 3. Swap bilateral hands: Left Hand (91-111) <-> Right Hand (112-132)
+    left_hand = flipped[:, 91:112].copy()
+    right_hand = flipped[:, 112:133].copy()
+    flipped[:, 91:112] = right_hand
+    flipped[:, 112:133] = left_hand
+
+    return flipped
+
+
 def augment_sequence(seq: np.ndarray, num_augments: int = 12) -> list[np.ndarray]:
     """
     Generate realistic temporal and spatial sub-windows from a single recorded sample.
-    Extracts sliding windows (e.g., length 30-42) and slight scale/jitter variations.
+    Extracts sliding windows (e.g., length 30-42), slight scale/jitter variations,
+    and synthetic horizontal mirroring for ambidextrous support.
     """
     T = seq.shape[0]
     augmented = [seq]  # Include original sequence
@@ -180,7 +211,7 @@ def augment_sequence(seq: np.ndarray, num_augments: int = 12) -> list[np.ndarray
     if T < 20:
         return augmented
 
-    # 1. Sliding temporal windows (e.g. 32 to 40 frames)
+    # 1. Sliding temporal windows (e.g. 30 to 40 frames)
     for win_len in [30, 35, 40]:
         if win_len >= T:
             continue
@@ -189,10 +220,16 @@ def augment_sequence(seq: np.ndarray, num_augments: int = 12) -> list[np.ndarray
             sub_seq = seq[start_idx : start_idx + win_len].copy()
             augmented.append(sub_seq)
 
-    # 2. Resampling & slight noise/scaling
+    # 2. Synthetic horizontal mirroring (Ambidextrous Left/Right Hand clone)
+    mirrored_seq = mirror_sequence(seq)
+    augmented.append(mirrored_seq)
+    if T >= 35:
+        augmented.append(mirrored_seq[:35].copy())
+        augmented.append(mirrored_seq[-35:].copy())
+
+    # 3. Resampling & slight noise/scaling
     rng = np.random.RandomState(42)
     for _ in range(num_augments):
-        # Choose a random window
         win_size = rng.randint(max(25, T - 15), T + 1)
         start = rng.randint(0, max(1, T - win_size + 1))
         sub = seq[start : start + win_size].copy()

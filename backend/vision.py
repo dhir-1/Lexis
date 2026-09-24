@@ -196,6 +196,18 @@ class RobustSignEngine:
             self.reset()
             return []
 
+        # Foreshortening wrist clamp: when pointing straight at camera,
+        # prevent detached wrist from snapping across body
+        if has_right and right_kpts is not None:
+            hmcp = (right_kpts[5] + right_kpts[9] + right_kpts[13] + right_kpts[17]) / 4.0
+            if self._dist(right_kpts[0], hmcp) > 0.18:
+                right_kpts[0] = hmcp + np.array([0.0, 0.04], dtype=np.float32)
+
+        if has_left and left_kpts is not None:
+            hmcp = (left_kpts[5] + left_kpts[9] + left_kpts[13] + left_kpts[17]) / 4.0
+            if self._dist(left_kpts[0], hmcp) > 0.18:
+                left_kpts[0] = hmcp + np.array([0.0, 0.04], dtype=np.float32)
+
         r_wrist = right_kpts[0] if has_right else None
         l_wrist = left_kpts[0] if has_left else None
 
@@ -269,11 +281,12 @@ class RobustSignEngine:
                     else:
                         return []
 
-                if best_prob >= 0.38 and (best_prob - second_prob >= 0.03) and best_word:
+                # 50-Class confidence thresholding (with 50 classes, uniform prior is 2%, so 28%+ with margin is a dominant winner)
+                if best_prob >= 0.28 and (best_prob - second_prob >= 0.03) and best_word:
                     if best_word.lower() == "idle":
                         return []
                     # Boost confidence so valid gesture passes commit threshold smoothly
-                    commit_conf = float(np.clip(best_prob * 1.15 + 0.10, 0.85, 0.98))
+                    commit_conf = float(np.clip(best_prob * 1.30 + 0.35, 0.85, 0.98))
                     return [(best_word, commit_conf)] + all_candidates[1:5]
 
                 return all_candidates[:5]
@@ -502,8 +515,15 @@ class VisionStream:
             if scores[i] > 0.25:
                 cv2.circle(frame, (x, y), 4, color, -1)
 
+        max_bone_len = 0.16 * max(img_w, img_h)
         for p1_idx, p2_idx in HAND_CONNECTIONS:
             if scores[p1_idx] > 0.25 and scores[p2_idx] > 0.25:
+                dx = points[p1_idx][0] - points[p2_idx][0]
+                dy = points[p1_idx][1] - points[p2_idx][1]
+                dist = np.hypot(dx, dy)
+                # Skip physically impossible long stretched lines (ghost jumps)
+                if dist > max_bone_len:
+                    continue
                 cv2.line(frame, points[p1_idx], points[p2_idx], (255, 255, 255), 2, cv2.LINE_AA)
 
     def _draw_hud(self, frame, text: str, confidence: float, fps: float) -> None:
@@ -627,6 +647,14 @@ class VisionStream:
                         norm_kpts[:, 0] /= max(w, 1)
                         norm_kpts[:, 1] /= max(h, 1)
 
+                        # Anatomical wrist clamp: when pointing straight at camera,
+                        # prevent detached wrist from snapping across body
+                        for hand_slice in [RIGHT_HAND_IDX, LEFT_HAND_IDX]:
+                            hwrist = norm_kpts[hand_slice[0], :2]
+                            hmcp = np.mean(norm_kpts[[hand_slice[5], hand_slice[9], hand_slice[13], hand_slice[17]], :2], axis=0)
+                            if float(np.linalg.norm(hwrist - hmcp)) > 0.16:
+                                norm_kpts[hand_slice[0], :2] = hmcp + np.array([0.0, 0.04], dtype=np.float32)
+
                         body_kpts = norm_kpts[BODY_IDX]
                         body_scores = scores[BODY_IDX]
                         left_kpts = norm_kpts[LEFT_HAND_IDX]
@@ -637,10 +665,22 @@ class VisionStream:
                         left_mean = float(np.mean(left_scores))
                         right_mean = float(np.mean(right_scores))
 
+                        # Ghost duplicate suppression: if both hands overlap closely, suppress weaker
+                        if left_mean > 0.20 and right_mean > 0.20:
+                            r_center = np.mean(right_kpts[:, :2], axis=0)
+                            l_center = np.mean(left_kpts[:, :2], axis=0)
+                            if np.linalg.norm(r_center - l_center) < 0.08:
+                                if right_mean > left_mean:
+                                    left_mean = 0.0
+                                    left_scores = np.zeros_like(left_scores)
+                                else:
+                                    right_mean = 0.0
+                                    right_scores = np.zeros_like(right_scores)
+
                         # Draw skeletons for active hands
-                        if right_mean > 0.18:
+                        if right_mean > 0.22:
                             self._draw_hand_skeleton(display_frame, right_kpts, right_scores, w, h, color=(0, 240, 120))
-                        if left_mean > 0.18:
+                        if left_mean > 0.22:
                             self._draw_hand_skeleton(display_frame, left_kpts, left_scores, w, h, color=(0, 200, 255))
 
                         # Classify gesture frame
