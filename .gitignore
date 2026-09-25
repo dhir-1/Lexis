@@ -31,6 +31,10 @@ artifacts/
 *.log
 backend/audit_report.csv
 audit_report.csv
+*.wav
+*.mp4
+backend/uploads/
+
 
 # Agent and internal architecture memory files (omitted from public portfolio)
 AGENTS.md

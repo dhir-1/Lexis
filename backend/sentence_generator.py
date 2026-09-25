@@ -238,9 +238,11 @@ def smooth_asl_sentence(tokens: list[str]) -> str:
     if not raw_key:
         return ""
 
-    # 1. Fast-path lookup for single words
-    if len(tokens) == 1 and raw_key in FAST_PATH_MAP:
-        return FAST_PATH_MAP[raw_key]
+    # 1. Single-word handling: NEVER call LLM for a single word
+    if len(tokens) <= 1:
+        if raw_key in FAST_PATH_MAP:
+            return FAST_PATH_MAP[raw_key]
+        return _heuristic_smooth(tokens)
 
     # 2. Check known common phrase heuristics
     if raw_key in COMMON_PHRASE_HEURISTICS:

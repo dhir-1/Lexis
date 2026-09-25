@@ -22,7 +22,7 @@ CAMERA_INDEX = int(os.getenv("VISION_CAMERA_INDEX", "0"))
 MIN_CONFIDENCE = float(os.getenv("VISION_MIN_CONFIDENCE", "0.72"))
 HOLD_REQUIRED_FRAMES = 4      # 4 frames (~0.12s) snappy hold for instant recognition
 TOKEN_COOLDOWN_SECONDS = 0.35 # Fluid natural conversational signing speed
-SENTENCE_RESET_SECONDS = 5.0  # Natural pause before sentence is finalized
+SENTENCE_RESET_SECONDS = 3.5  # Natural pause after full sentence before sending to LLM
 
 
 FLASH_SECONDS = 0.85
