@@ -10,6 +10,8 @@ backend/venv/
 env/
 .env
 backend/.env
+node_modules/
+frontend-app/node_modules/
 
 # IDE / Editor / OS files
 .vscode/

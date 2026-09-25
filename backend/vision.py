@@ -618,7 +618,7 @@ class VisionStream:
                     self.flash_until = time.monotonic() + FLASH_SECONDS + 2.0
                     print(f"[GEMINI 1.5 FLASH]: \"{raw}\" -> \"{smoothed}\"")
                     log_async(
-                        input_type="vision_sentence",
+                        input_type="vision",
                         text=smoothed,
                         confidence=sentence_confidence,
                         detected_language="asl",

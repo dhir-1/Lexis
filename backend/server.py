@@ -66,20 +66,36 @@ app.add_middleware(
 def _generate_mjpeg():
     """Generates continuous MJPEG frames for browser video streaming."""
     blank_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    # Warm dark slate canvas with clean message
+    blank_frame[:] = (20, 24, 28)
     cv2.putText(
         blank_frame,
-        "Connecting to Lexis Vision Stream...",
-        (60, 120),
+        "Lexis Vision Inactive",
+        (460, 340),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (160, 160, 255),
+        1.1,
+        (220, 220, 240),
         2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        blank_frame,
+        "Click 'Start Detection' to begin continuous ASL subtitling",
+        (310, 390),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.75,
+        (160, 160, 175),
+        1,
         cv2.LINE_AA,
     )
     _, blank_bytes = cv2.imencode(".jpg", blank_frame)
     blank_payload = blank_bytes.tobytes()
 
     while True:
+        if not is_vision_stream_running():
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + blank_payload + b"\r\n")
+            time.sleep(0.1)
+            continue
         frame_bytes = get_latest_frame_bytes()
         payload = frame_bytes if frame_bytes is not None else blank_payload
         yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + payload + b"\r\n")
@@ -89,8 +105,6 @@ def _generate_mjpeg():
 @app.get("/api/vision/stream")
 def vision_stream():
     """Streams live webcam feed with RTMPose Wholebody skeleton and HUD overlays."""
-    if not is_vision_stream_running():
-        start_vision_stream()
     return StreamingResponse(_generate_mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
@@ -171,7 +185,7 @@ async def translate_audio_file(file: UploadFile = File(...)):
 
         # Log to Neon DB
         log_async(
-            input_type="audio_speech",
+            input_type="audio",
             text=english_translation,
             confidence=None,
             detected_language=detected_language,
@@ -217,7 +231,7 @@ async def analyze_uploaded_video(file: UploadFile = File(...)):
         # Log to Database
         if report.get("is_sign_language"):
             log_async(
-                input_type="studio_video",
+                input_type="vision",
                 text=str(report.get("final_english_translation", "")),
                 confidence=float(report.get("language_confidence", 0.0)),
                 detected_language="asl",
@@ -306,14 +320,20 @@ def system_status():
     }
 
 
-# ── Serve Frontend Static Files ───────────────────────────────────────────────
+# ── Serve Frontend Static Files (Vite React Build + Static Fallback) ──────────
+
+DIST_DIR = FRONTEND_DIR / "dist"
+if (DIST_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
-    @app.get("/", response_class=HTMLResponse)
-    def index():
-        index_file = FRONTEND_DIR / "index.html"
-        if index_file.exists():
-            return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
-        return HTMLResponse("<h1>Lexis Frontend Initializing...</h1>")
+@app.get("/", response_class=HTMLResponse)
+def index():
+    if (DIST_DIR / "index.html").exists():
+        return HTMLResponse(content=(DIST_DIR / "index.html").read_text(encoding="utf-8"))
+    index_file = FRONTEND_DIR / "index.html"
+    if index_file.exists():
+        return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Lexis Frontend Initializing...</h1>")
