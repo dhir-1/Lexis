@@ -255,7 +255,17 @@ def record_and_translate():
                 if detected_language.lower() == "en":
                     translated_text = raw_text
                 else:
-                    translated_text = _translate_groq(raw_text, detected_language)
+                    # Direct Groq Whisper native translation (<200ms)
+                    try:
+                        with open(TEMP_AUDIO_PATH, "rb") as f:
+                            trans_res = _groq_client.audio.translations.create(
+                                file=(TEMP_AUDIO_PATH.name, f.read()),
+                                model="whisper-large-v3",
+                                response_format="json",
+                            )
+                        translated_text = _clean_text(trans_res.text)
+                    except Exception:
+                        translated_text = _translate_groq(raw_text, detected_language)
 
                 if _is_hallucination(translated_text):
                     continue
