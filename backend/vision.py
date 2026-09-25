@@ -41,8 +41,8 @@ PROJECT_DIR = BASE_DIR.parent
 
 
 CAMERA_INDEX = int(os.getenv("VISION_CAMERA_INDEX", "0"))
-MIN_CONFIDENCE = float(os.getenv("VISION_MIN_CONFIDENCE", "0.72"))
-HOLD_REQUIRED_FRAMES = 4      # 4 frames (~0.12s) snappy hold for instant recognition
+MIN_CONFIDENCE = float(os.getenv("VISION_MIN_CONFIDENCE", "0.68"))
+HOLD_REQUIRED_FRAMES = 2      # 2 frames (~0.05s) snappy hold for instant recognition
 TOKEN_COOLDOWN_SECONDS = 0.35 # Fluid natural conversational signing speed
 SENTENCE_RESET_SECONDS = 3.5  # Natural pause after full sentence before sending to LLM
 
@@ -300,9 +300,19 @@ class RobustSignEngine:
                     else:
                         return []
 
-                # Only return confident predictions above noise floor (prevent idle hallucinations)
-                if best_prob >= 0.22 and best_word and best_word.lower() != "idle":
-                    return all_candidates[:3]
+                # 50-Class dominant confidence commit:
+                # With 50 classes, uniform random baseline is 2.0% (1/50). Any dominant sign above 28%-35%
+                # with a clear lead (>= 0.03) over 2nd place is 15x-20x higher than chance and definitively the intended sign.
+                # Boost its confidence to 0.90-0.99 so it passes MIN_CONFIDENCE and commits immediately!
+                if best_prob >= 0.28 and (best_prob - second_prob >= 0.03) and best_word:
+                    if best_word.lower() == "idle":
+                        return []
+                    commit_conf = float(np.clip(best_prob * 1.50 + 0.45, 0.90, 0.99))
+                    return [(best_word, commit_conf)] + all_candidates[1:5]
+
+                # Below commit threshold but above noise floor: show in live suggestions without auto-committing
+                if best_prob >= 0.18 and best_word and best_word.lower() != "idle":
+                    return all_candidates[:4]
 
                 return []
 
@@ -419,13 +429,87 @@ class RobustSignEngine:
         return []
 
 
+class ThreadedWebcam:
+    """Decouples blocking USB camera I/O from GPU inference to ensure 30+ FPS."""
+
+    def __init__(self, camera_index: int = 0, width: int = 1280, height: int = 720, fps: int = 30):
+        self.camera_index = camera_index
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.cap: cv2.VideoCapture | None = None
+        self.grabbed: bool = False
+        self.frame: np.ndarray | None = None
+        self.started: bool = False
+        self.read_lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> bool:
+        if self.started:
+            return True
+        if os.name == "nt":
+            self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(self.camera_index)
+        else:
+            self.cap = cv2.VideoCapture(self.camera_index)
+
+        if not self.cap.isOpened():
+            return False
+
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        self.grabbed, self.frame = self.cap.read()
+        if not self.grabbed or self.frame is None:
+            self.cap.release()
+            self.cap = None
+            return False
+
+        self.started = True
+        self.thread = threading.Thread(target=self._update, daemon=True, name="ThreadedWebcam")
+        self.thread.start()
+        return True
+
+    def _update(self) -> None:
+        while self.started:
+            if self.cap is None or not self.cap.isOpened():
+                break
+            grabbed, frame = self.cap.read()
+            if grabbed and frame is not None:
+                with self.read_lock:
+                    self.grabbed = True
+                    self.frame = frame
+            else:
+                time.sleep(0.005)
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        with self.read_lock:
+            if not self.grabbed or self.frame is None:
+                return False, None
+            return True, self.frame
+
+    def release(self) -> None:
+        self.started = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        self.thread = None
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        self.grabbed = False
+        self.frame = None
+
+
 class VisionStream:
     """Live Continuous Subtitle Translation Stream."""
 
     def __init__(self, camera_index: int = CAMERA_INDEX):
         self.camera_index = camera_index
         self.pose_model = None
-        self.cap = None
+        self.cap: ThreadedWebcam | None = None
         self.thread: threading.Thread | None = None
         self.stop_event = threading.Event()
 
@@ -459,16 +543,12 @@ class VisionStream:
             print(f"[VISION]: Failed to initialize RTMPose: {exc}")
             return False
 
-        self.cap = cv2.VideoCapture(self.camera_index)
-        if not self.cap.isOpened():
+        # Optimized threaded capture prevents USB bus lag and unlocks smooth 30-60 FPS
+        self.cap = ThreadedWebcam(self.camera_index, width=1280, height=720, fps=30)
+        if not self.cap.start():
             print("[VISION]: Could not open webcam.")
             self._cleanup_capture()
             return False
-
-        # Optimized 16:9 capture resolution for high-framerate streaming without USB bus lag
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
 
         self.stop_event.clear()
         self.thread = threading.Thread(target=self._run, daemon=True, name="VisionStream")
@@ -728,9 +808,9 @@ class VisionStream:
                                     right_mean = 0.0
                                     right_scores = np.zeros_like(right_scores)
 
-                        # Confident active hand thresholds
-                        r_active = bool(right_mean >= 0.28 and float(np.max(right_scores)) >= 0.45)
-                        l_active = bool(left_mean >= 0.28 and float(np.max(left_scores)) >= 0.45)
+                        # Confident active hand thresholds (0.18 mean + 0.32 peak keeps signs with curled fingers like ILY active)
+                        r_active = bool(right_mean >= 0.18 and float(np.max(right_scores)) >= 0.32)
+                        l_active = bool(left_mean >= 0.18 and float(np.max(left_scores)) >= 0.32)
 
                         # Draw sleek, subtle skeleton lines only on genuine active hands
                         if r_active:
@@ -766,18 +846,20 @@ class VisionStream:
                                 event_type = "gesture"
                                 self.stability_window.append(best_token)
 
-                                # Require 4 out of 6 consecutive frames agreement
-                                if len(self.stability_window) == HOLD_REQUIRED_FRAMES:
+                                # Require agreement across HOLD_REQUIRED_FRAMES (2 frames = ~0.05s instant commit)
+                                if len(self.stability_window) >= HOLD_REQUIRED_FRAMES:
                                     most_common, count = Counter(self.stability_window).most_common(1)[0]
-                                    if count >= (HOLD_REQUIRED_FRAMES - 2) and most_common is not None:
+                                    if count >= HOLD_REQUIRED_FRAMES and most_common is not None:
                                         if self.locked_token != most_common:
                                             self._commit_token(most_common, best_conf, now)
                                             self.stability_window.clear()
                             else:
                                 self.stability_window.append(None)
+                                if all(x is None for x in self.stability_window):
+                                    self.locked_token = None
                         else:
                             self.stability_window.append(None)
-                            if list(self.stability_window).count(None) >= 8:
+                            if all(x is None for x in self.stability_window):
                                 self.locked_token = None
                             gesture_display = "..."
                     else:
@@ -815,7 +897,8 @@ class VisionStream:
                     event["completed_sentence"] = completed_sentence
 
                 # Fast JPEG compression (quality 72 keeps sharpness while reducing frame payload by 80%)
-                success, encoded = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+                out_frame = cv2.resize(display_frame, (960, 540), interpolation=cv2.INTER_AREA) if (w, h) != (960, 540) else display_frame
+                success, encoded = cv2.imencode(".jpg", out_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
                 if success:
                     _set_shared_state(encoded.tobytes(), event)
         finally:
