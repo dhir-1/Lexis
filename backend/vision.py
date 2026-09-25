@@ -1,9 +1,31 @@
 import json
 import os
+import sys
 import threading
 import time
 from collections import Counter, deque
 from pathlib import Path
+
+# CRITICAL: Register cuDNN 9 and CUDA 13 DLL paths BEFORE importing onnxruntime/rtmlib
+if os.name == "nt":
+    _base_dir = Path(__file__).resolve().parent
+    _torch_lib = _base_dir / "venv" / "Lib" / "site-packages" / "torch" / "lib"
+    if _torch_lib.exists():
+        try:
+            os.add_dll_directory(str(_torch_lib))
+            os.environ["PATH"] = str(_torch_lib) + os.pathsep + os.environ.get("PATH", "")
+        except Exception:
+            pass
+    for _cuda_bin in [
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\x64",
+    ]:
+        if os.path.exists(_cuda_bin):
+            try:
+                os.add_dll_directory(_cuda_bin)
+                os.environ["PATH"] = _cuda_bin + os.pathsep + os.environ.get("PATH", "")
+            except Exception:
+                pass
 
 import cv2
 import joblib
@@ -46,6 +68,7 @@ HAND_CONNECTIONS = [
 ]
 
 latest_frame_bytes: bytes | None = None
+latest_frame_id: int = 0
 latest_event: dict[str, object] = {
     "gesture": "...",
     "confidence": 0.0,
@@ -58,24 +81,6 @@ _vision_stream: "VisionStream | None" = None
 _state_lock = threading.Lock()
 
 
-def _register_cuda_dll_paths() -> None:
-    if os.name != "nt":
-        return
-    for path in [
-        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin",
-        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\x64",
-        r"C:\Program Files\NVIDIA\CUDNN\v9.23\bin\13.3\x64",
-        r"C:\Program Files\NVIDIA\CUDNN\v9.23\bin\12.9\x64",
-    ]:
-        if os.path.exists(path):
-            if path not in os.environ["PATH"]:
-                os.environ["PATH"] = path + os.pathsep + os.environ["PATH"]
-            try:
-                os.add_dll_directory(path)
-            except Exception:
-                pass
-
-
 def _is_cuda_available() -> bool:
     try:
         import torch
@@ -84,12 +89,12 @@ def _is_cuda_available() -> bool:
         return False
 
 
-
 def _set_shared_state(frame_bytes: bytes | None = None, event: dict[str, object] | None = None) -> None:
-    global latest_frame_bytes, latest_event
+    global latest_frame_bytes, latest_event, latest_frame_id
     with _state_lock:
         if frame_bytes is not None:
             latest_frame_bytes = frame_bytes
+            latest_frame_id += 1
         if event is not None:
             latest_event = dict(event)
 
@@ -97,6 +102,11 @@ def _set_shared_state(frame_bytes: bytes | None = None, event: dict[str, object]
 def get_latest_frame_bytes() -> bytes | None:
     with _state_lock:
         return latest_frame_bytes
+
+
+def get_latest_frame_and_id() -> tuple[int, bytes | None]:
+    with _state_lock:
+        return latest_frame_id, latest_frame_bytes
 
 
 def get_latest_event() -> dict[str, object]:
@@ -441,7 +451,6 @@ class VisionStream:
             return True
         self._reset_state()
 
-        _register_cuda_dll_paths()
         try:
             self.pose_model = RTMPose(
                 Wholebody.MODE["performance"]["pose"],
@@ -460,8 +469,9 @@ class VisionStream:
             self._cleanup_capture()
             return False
 
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # Optimized 16:9 capture resolution for high-framerate streaming without USB bus lag
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
 
         self.stop_event.clear()
@@ -798,7 +808,8 @@ class VisionStream:
                 if completed_sentence is not None:
                     event["completed_sentence"] = completed_sentence
 
-                success, encoded = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                # Fast JPEG compression (quality 72 keeps sharpness while reducing frame payload by 80%)
+                success, encoded = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
                 if success:
                     _set_shared_state(encoded.tobytes(), event)
         finally:

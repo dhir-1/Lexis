@@ -32,6 +32,7 @@ from sign_studio import get_sign_studio
 from vision import (
     get_latest_event,
     get_latest_frame_bytes,
+    get_latest_frame_and_id,
     is_vision_stream_running,
     start_vision_stream,
     stop_vision_stream,
@@ -64,16 +65,15 @@ app.add_middleware(
 # ── MJPEG Video Streaming Endpoint ───────────────────────────────────────────
 
 def _generate_mjpeg():
-    """Generates continuous MJPEG frames for browser video streaming."""
-    blank_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-    # Warm dark slate canvas with clean message
+    """Generates continuous MJPEG frames for browser video streaming with zero buffer lag."""
+    blank_frame = np.zeros((540, 960, 3), dtype=np.uint8)
     blank_frame[:] = (20, 24, 28)
     cv2.putText(
         blank_frame,
         "Lexis Vision Inactive",
-        (460, 340),
+        (330, 260),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.1,
+        1.0,
         (220, 220, 240),
         2,
         cv2.LINE_AA,
@@ -81,25 +81,30 @@ def _generate_mjpeg():
     cv2.putText(
         blank_frame,
         "Click 'Start Detection' to begin continuous ASL subtitling",
-        (310, 390),
+        (210, 305),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.75,
+        0.7,
         (160, 160, 175),
         1,
         cv2.LINE_AA,
     )
-    _, blank_bytes = cv2.imencode(".jpg", blank_frame)
+    _, blank_bytes = cv2.imencode(".jpg", blank_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
     blank_payload = blank_bytes.tobytes()
 
+    last_sent_id = -1
     while True:
         if not is_vision_stream_running():
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + blank_payload + b"\r\n")
             time.sleep(0.1)
             continue
-        frame_bytes = get_latest_frame_bytes()
-        payload = frame_bytes if frame_bytes is not None else blank_payload
-        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + payload + b"\r\n")
-        time.sleep(0.033)  # ~30 FPS
+
+        frame_id, frame_bytes = get_latest_frame_and_id()
+        if frame_bytes is not None and frame_id != last_sent_id:
+            last_sent_id = frame_id
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+            time.sleep(0.025)
+        else:
+            time.sleep(0.005)
 
 
 @app.get("/api/vision/stream")
