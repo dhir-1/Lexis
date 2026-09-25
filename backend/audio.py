@@ -11,6 +11,7 @@ import sounddevice as sd
 from dotenv import load_dotenv
 
 from database import log_async
+from sentence_generator import translate_speech_gemini
 
 load_dotenv()
 
@@ -147,27 +148,39 @@ def _transcribe_groq(wav_path: Path) -> tuple[str, str]:
 
 
 def _translate_groq(text: str, from_language: str) -> str:
-    """Translates non-English speech into English subtitles using ultra-fast LLaMA-3.1-8B-Instant."""
+    """Translates non-English speech into English subtitles using Gemini 1.5 Flash, with Groq fallback."""
     if from_language.lower() == "en":
         return text
 
-    source_name = _language_label(from_language)
-    response = _groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {
-                "role": "system",
-                "content": f"You are a real-time subtitle translator. Translate the following {source_name} spoken speech directly into fluent English subtitles. Output only the English translation with no quotes or extra commentary.",
-            },
-            {
-                "role": "user",
-                "content": text,
-            }
-        ],
-        max_tokens=150,
-        temperature=0.1,
-    )
-    return _clean_text(response.choices[0].message.content)
+    # Primary: Gemini 1.5 Flash
+    translated = translate_speech_gemini(text, from_language)
+    if translated and translated != text:
+        return translated
+
+    # Fallback to Groq if configured
+    if _groq_client is not None:
+        try:
+            source_name = _language_label(from_language)
+            response = _groq_client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"You are a real-time subtitle translator. Translate the following {source_name} spoken speech directly into fluent English subtitles. Output only the English translation with no quotes or extra commentary.",
+                    },
+                    {
+                        "role": "user",
+                        "content": text,
+                    }
+                ],
+                max_tokens=150,
+                temperature=0.1,
+            )
+            return _clean_text(response.choices[0].message.content)
+        except Exception as exc:
+            print(f"[AUDIO TRANSLATE ERROR]: Groq fallback failed: {exc}")
+
+    return text
 
 
 # ── Fallback transcription ───────────────────────────────────────────────────

@@ -8,10 +8,10 @@ from pathlib import Path
 import cv2
 import joblib
 import numpy as np
-import torch
 from rtmlib import RTMPose, Wholebody
 
 from database import log_async
+from sentence_generator import smooth_asl_sentence_async
 from train_user_signs import build_sequence_vector_from_matrix, extract_frame_features
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -74,6 +74,15 @@ def _register_cuda_dll_paths() -> None:
                 os.add_dll_directory(path)
             except Exception:
                 pass
+
+
+def _is_cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
 
 
 def _set_shared_state(frame_bytes: bytes | None = None, event: dict[str, object] | None = None) -> None:
@@ -438,7 +447,7 @@ class VisionStream:
                 Wholebody.MODE["performance"]["pose"],
                 model_input_size=Wholebody.MODE["performance"]["pose_input_size"],
                 backend="onnxruntime",
-                device="cuda" if torch.cuda.is_available() else "cpu",
+                device="cuda" if _is_cuda_available() else "cpu",
             )
             print("[VISION]: RTMPose Wholebody ready.")
         except Exception as exc:
@@ -586,6 +595,7 @@ class VisionStream:
         log_async(input_type="vision_gesture", text=sentence_text, confidence=confidence)
 
     def _flush_sentence(self, now: float) -> tuple[str, float]:
+        tokens_to_smooth = list(self.current_sentence_tokens)
         sentence_text = self._format_sentence()
         sentence_confidence = 0.0
         if self.current_sentence_confidences:
@@ -600,6 +610,23 @@ class VisionStream:
         self.stability_window.clear()
         self.locked_token = None
         self.last_gesture_time = None
+
+        if tokens_to_smooth:
+            def _on_smoothed(raw: str, smoothed: str):
+                if smoothed:
+                    self.flash_text = smoothed
+                    self.flash_until = time.monotonic() + FLASH_SECONDS + 2.0
+                    print(f"[GEMINI 1.5 FLASH]: \"{raw}\" -> \"{smoothed}\"")
+                    log_async(
+                        input_type="vision_sentence",
+                        text=smoothed,
+                        confidence=sentence_confidence,
+                        detected_language="asl",
+                        raw_text=raw,
+                    )
+
+            smooth_asl_sentence_async(tokens_to_smooth, _on_smoothed)
+
         return sentence_text, sentence_confidence
 
     def _run(self) -> None:
