@@ -300,15 +300,11 @@ class RobustSignEngine:
                     else:
                         return []
 
-                # 50-Class confidence thresholding (with 50 classes, uniform prior is 2%, so 28%+ with margin is a dominant winner)
-                if best_prob >= 0.28 and (best_prob - second_prob >= 0.03) and best_word:
-                    if best_word.lower() == "idle":
-                        return []
-                    # Boost confidence so valid gesture passes commit threshold smoothly
-                    commit_conf = float(np.clip(best_prob * 1.30 + 0.35, 0.85, 0.98))
-                    return [(best_word, commit_conf)] + all_candidates[1:5]
+                # Only return confident predictions above noise floor (prevent idle hallucinations)
+                if best_prob >= 0.22 and best_word and best_word.lower() != "idle":
+                    return all_candidates[:3]
 
-                return all_candidates[:5]
+                return []
 
 
             except Exception:
@@ -628,7 +624,7 @@ class VisionStream:
                     self.flash_until = time.monotonic() + FLASH_SECONDS + 2.0
                     print(f"[GEMINI 1.5 FLASH]: \"{raw}\" -> \"{smoothed}\"")
                     log_async(
-                        input_type="vision",
+                        input_type="vision_gesture",
                         text=smoothed,
                         confidence=sentence_confidence,
                         detected_language="asl",
@@ -702,6 +698,24 @@ class VisionStream:
                         left_mean = float(np.mean(left_scores))
                         right_mean = float(np.mean(right_scores))
 
+                        # Body-Arm attachment anchor check:
+                        # Reject background objects (like wall clocks or posters) far from user's body
+                        has_body = bool(body_scores[0] > 0.15 or body_scores[5] > 0.15 or body_scores[6] > 0.15)
+                        if has_body:
+                            body_anchors = [body_kpts[i, :2] for i in [0, 5, 6, 7, 8] if body_scores[i] > 0.12]
+                            if body_anchors:
+                                anchors_arr = np.array(body_anchors)
+                                if right_mean > 0.15:
+                                    r_dist = float(np.min(np.linalg.norm(anchors_arr - right_kpts[0, :2], axis=1)))
+                                    if r_dist > 0.52:
+                                        right_mean = 0.0
+                                        right_scores[:] = 0.0
+                                if left_mean > 0.15:
+                                    l_dist = float(np.min(np.linalg.norm(anchors_arr - left_kpts[0, :2], axis=1)))
+                                    if l_dist > 0.52:
+                                        left_mean = 0.0
+                                        left_scores[:] = 0.0
+
                         # Ghost duplicate suppression: if both hands overlap closely, suppress weaker
                         if left_mean > 0.20 and right_mean > 0.20:
                             r_center = np.mean(right_kpts[:, :2], axis=0)
@@ -714,11 +728,15 @@ class VisionStream:
                                     right_mean = 0.0
                                     right_scores = np.zeros_like(right_scores)
 
-                        # Draw skeletons for active hands
-                        if right_mean > 0.22:
-                            self._draw_hand_skeleton(display_frame, right_kpts, right_scores, w, h, color=(0, 240, 120))
-                        if left_mean > 0.22:
-                            self._draw_hand_skeleton(display_frame, left_kpts, left_scores, w, h, color=(0, 200, 255))
+                        # Confident active hand thresholds
+                        r_active = bool(right_mean >= 0.28 and float(np.max(right_scores)) >= 0.45)
+                        l_active = bool(left_mean >= 0.28 and float(np.max(left_scores)) >= 0.45)
+
+                        # Draw sleek, subtle skeleton lines only on genuine active hands
+                        if r_active:
+                            self._draw_hand_skeleton(display_frame, right_kpts, right_scores, w, h, color=(120, 240, 180))
+                        if l_active:
+                            self._draw_hand_skeleton(display_frame, left_kpts, left_scores, w, h, color=(140, 210, 255))
 
                         # Classify gesture frame
                         full_kpts_133 = np.zeros((133, 3), dtype=np.float32)
@@ -726,15 +744,14 @@ class VisionStream:
                         full_kpts_133[:, 2] = scores
 
                         candidates = self.engine.classify(
-                            right_kpts if right_mean > 0.18 else None,
-                            right_scores if right_mean > 0.18 else None,
-                            left_kpts if left_mean > 0.18 else None,
-                            left_scores if left_mean > 0.18 else None,
+                            right_kpts if r_active else None,
+                            right_scores if r_active else None,
+                            left_kpts if l_active else None,
+                            left_scores if l_active else None,
                             body_kpts,
                             body_scores,
                             full_kpts=full_kpts_133,
                         )
-
 
                         if candidates:
                             top_predictions = [
@@ -774,7 +791,7 @@ class VisionStream:
                     self.locked_token = None
                     gesture_display = "..."
 
-                # Auto-flush complete sentence after comfortable natural pause (5.5s)
+                # Auto-flush complete sentence after comfortable natural pause (3.5s)
                 if (
                     self.current_sentence_tokens
                     and self.last_gesture_time is not None
@@ -785,25 +802,14 @@ class VisionStream:
                     gesture_confidence = sentence_confidence
                     event_type = "sentence_complete"
 
-                subtitle_text = completed_sentence if completed_sentence is not None else self._format_sentence()
-                subtitle_flash = bool(self.flash_text and now < self.flash_until)
-                if subtitle_flash:
-                    subtitle_text = self.flash_text
-                elif self.flash_text and now >= self.flash_until:
-                    self.flash_text = ""
-
-                # Draw UI HUD
-                self._draw_hud(display_frame, gesture_display, gesture_confidence, fps_counter)
-                self._draw_suggestions(display_frame, top_predictions)
-                if subtitle_text:
-                    self._draw_subtitle_bar(display_frame, subtitle_text, flash=subtitle_flash)
-
+                # Keep video display pristine: ALL HUD is rendered cleanly by React via WebSocket!
                 event = {
                     "gesture": gesture_display,
                     "confidence": round(float(gesture_confidence), 3),
                     "top_predictions": top_predictions,
                     "sentence_so_far": completed_sentence if completed_sentence is not None else self._format_sentence(),
                     "event_type": event_type,
+                    "fps": round(fps_counter, 1),
                 }
                 if completed_sentence is not None:
                     event["completed_sentence"] = completed_sentence
