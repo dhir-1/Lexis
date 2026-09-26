@@ -41,6 +41,8 @@ PROJECT_DIR = BASE_DIR.parent
 
 
 CAMERA_INDEX = int(os.getenv("VISION_CAMERA_INDEX", "0"))
+CAMERA_WIDTH = int(os.getenv("VISION_CAMERA_WIDTH", "640"))
+CAMERA_HEIGHT = int(os.getenv("VISION_CAMERA_HEIGHT", "480"))
 MIN_CONFIDENCE = float(os.getenv("VISION_MIN_CONFIDENCE", "0.68"))
 HOLD_REQUIRED_FRAMES = 3      # 3 frames (~0.09s) snappy hold for instant recognition
 TOKEN_COOLDOWN_SECONDS = 0.35 # Fluid natural conversational signing speed
@@ -257,11 +259,6 @@ class RobustSignEngine:
                 l_dy = (l_wrist[1] - old[2]) / l_scale
                 l_speed = float(np.sqrt(l_dx**2 + l_dy**2))
 
-        # Downward retraction filter (ignoring drop transitions to desk)
-        if (has_right and r_dy > 0.20 and r_speed > 0.25) or (has_left and l_dy > 0.20 and l_speed > 0.25):
-            self.reset()
-            return []
-
         # Active hands elevated in signing box (fingertips/hand above bottom desk cutoff)
         r_min_y = float(np.min(right_kpts[:, 1])) if has_right else 1.0
         l_min_y = float(np.min(left_kpts[:, 1])) if has_left else 1.0
@@ -269,6 +266,7 @@ class RobustSignEngine:
         l_elevated = has_left and l_min_y < 0.94
 
         if not r_elevated and not l_elevated:
+            self.reset()
             return []
 
         # =========================================================================
@@ -293,19 +291,19 @@ class RobustSignEngine:
 
 
                 # 50-Class dominant confidence commit:
-                # With 50 classes, uniform random baseline is 2.0% (1/50). Any dominant sign above 35%-40%
-                # (or >= 28% with a clear lead) is 15x-20x higher than chance and definitively the intended sign.
-                # Boost its confidence to 0.90-0.99 so it passes MIN_CONFIDENCE and commits immediately!
-                is_dominant = (best_prob >= 0.35 and (best_prob - second_prob >= 0.02)) or \
-                              (best_prob >= 0.28 and (best_prob - second_prob >= 0.025))
+                # With 50 classes, uniform random baseline is 2.0% (1/50). Any dominant sign above 25%-32%
+                # with a clear lead over the second candidate is statistically definitive.
+                # Boost its confidence to 0.88-0.99 so it passes MIN_CONFIDENCE and commits smoothly!
+                is_dominant = (best_prob >= 0.30 and (best_prob - second_prob >= 0.02)) or \
+                              (best_prob >= 0.24 and (best_prob - second_prob >= 0.025))
                 if is_dominant and best_word:
                     if best_word.lower() == "idle":
                         return []
-                    commit_conf = float(np.clip(best_prob * 1.50 + 0.45, 0.90, 0.99))
+                    commit_conf = float(np.clip(best_prob * 1.50 + 0.45, 0.88, 0.99))
                     return [(best_word, commit_conf)] + all_candidates[1:5]
 
                 # Below commit threshold but above noise floor: show in live suggestions without auto-committing
-                if best_prob >= 0.18 and best_word and best_word.lower() != "idle":
+                if best_prob >= 0.16 and best_word and best_word.lower() != "idle":
                     return all_candidates[:4]
 
                 return []
@@ -426,7 +424,7 @@ class RobustSignEngine:
 class ThreadedWebcam:
     """Decouples blocking USB camera I/O from GPU inference to ensure 30+ FPS."""
 
-    def __init__(self, camera_index: int = 0, width: int = 1280, height: int = 720, fps: int = 30):
+    def __init__(self, camera_index: int = 0, width: int = CAMERA_WIDTH, height: int = CAMERA_HEIGHT, fps: int = 30):
         self.camera_index = camera_index
         self.width = width
         self.height = height
@@ -450,6 +448,11 @@ class ThreadedWebcam:
 
         if not self.cap.isOpened():
             return False
+
+        try:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except Exception:
+            pass
 
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
@@ -539,7 +542,7 @@ class VisionStream:
             return False
 
         # Optimized threaded capture prevents USB bus lag and unlocks smooth 30-60 FPS
-        self.cap = ThreadedWebcam(self.camera_index, width=1280, height=720, fps=30)
+        self.cap = ThreadedWebcam(self.camera_index, width=CAMERA_WIDTH, height=CAMERA_HEIGHT, fps=30)
         if not self.cap.start():
             print("[VISION]: Could not open webcam.")
             self._cleanup_capture()
@@ -680,7 +683,7 @@ class VisionStream:
         print(f"[SUBTITLE STREAM]: + '{token}' -> \"{sentence_text}\"")
         log_async(input_type="vision_gesture", text=sentence_text, confidence=confidence)
 
-    def _flush_sentence(self, now: float) -> tuple[str, float]:
+    def _flush_sentence(self, now: float, hands_active: bool = False) -> tuple[str, float]:
         tokens_to_smooth = list(self.current_sentence_tokens)
         sentence_text = self._format_sentence()
         sentence_confidence = 0.0
@@ -694,7 +697,8 @@ class VisionStream:
         self.current_sentence_tokens.clear()
         self.current_sentence_confidences.clear()
         self.stability_window.clear()
-        self.locked_token = None
+        if not hands_active:
+            self.locked_token = None
         self.last_gesture_time = None
 
         if tokens_to_smooth:
@@ -882,7 +886,7 @@ class VisionStream:
                     and self.last_gesture_time is not None
                     and now - self.last_gesture_time >= SENTENCE_RESET_SECONDS
                 ):
-                    completed_sentence, sentence_confidence = self._flush_sentence(now)
+                    completed_sentence, sentence_confidence = self._flush_sentence(now, hands_active=(r_active or l_active))
                     gesture_display = "..."
                     gesture_confidence = sentence_confidence
                     event_type = "sentence_complete"
@@ -899,9 +903,8 @@ class VisionStream:
                 if completed_sentence is not None:
                     event["completed_sentence"] = completed_sentence
 
-                # Fast JPEG compression (quality 72 keeps sharpness while reducing frame payload by 80%)
-                out_frame = cv2.resize(display_frame, (960, 540), interpolation=cv2.INTER_AREA) if (w, h) != (960, 540) else display_frame
-                success, encoded = cv2.imencode(".jpg", out_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+                # Direct high-speed JPEG encoding with zero redundant CPU resize overhead
+                success, encoded = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if success:
                     _set_shared_state(encoded.tobytes(), event)
         finally:
