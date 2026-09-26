@@ -301,10 +301,12 @@ class RobustSignEngine:
                         return []
 
                 # 50-Class dominant confidence commit:
-                # With 50 classes, uniform random baseline is 2.0% (1/50). Any dominant sign above 28%-35%
-                # with a clear lead (>= 0.03) over 2nd place is 15x-20x higher than chance and definitively the intended sign.
+                # With 50 classes, uniform random baseline is 2.0% (1/50). Any dominant sign above 35%-40%
+                # (or >= 28% with a clear lead) is 15x-20x higher than chance and definitively the intended sign.
                 # Boost its confidence to 0.90-0.99 so it passes MIN_CONFIDENCE and commits immediately!
-                if best_prob >= 0.28 and (best_prob - second_prob >= 0.03) and best_word:
+                is_dominant = (best_prob >= 0.35 and (best_prob - second_prob >= 0.02)) or \
+                              (best_prob >= 0.28 and (best_prob - second_prob >= 0.025))
+                if is_dominant and best_word:
                     if best_word.lower() == "idle":
                         return []
                     commit_conf = float(np.clip(best_prob * 1.50 + 0.45, 0.90, 0.99))
