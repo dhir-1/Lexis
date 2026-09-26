@@ -42,7 +42,7 @@ PROJECT_DIR = BASE_DIR.parent
 
 CAMERA_INDEX = int(os.getenv("VISION_CAMERA_INDEX", "0"))
 MIN_CONFIDENCE = float(os.getenv("VISION_MIN_CONFIDENCE", "0.68"))
-HOLD_REQUIRED_FRAMES = 2      # 2 frames (~0.05s) snappy hold for instant recognition
+HOLD_REQUIRED_FRAMES = 3      # 3 frames (~0.09s) snappy hold for instant recognition
 TOKEN_COOLDOWN_SECONDS = 0.35 # Fluid natural conversational signing speed
 SENTENCE_RESET_SECONDS = 3.5  # Natural pause after full sentence before sending to LLM
 
@@ -148,6 +148,8 @@ class RobustSignEngine:
     def reset(self) -> None:
         self.r_traj.clear()
         self.l_traj.clear()
+        self.seq_buffer.clear()
+        self.frame_feats_buffer.clear()
 
 
     @staticmethod
@@ -288,17 +290,7 @@ class RobustSignEngine:
                 best_word, best_prob = all_candidates[0]
                 second_prob = all_candidates[1][1] if len(all_candidates) > 1 else 0.0
 
-                # Kinematic transition guards:
-                # Downward descent (e.g. hand moving down from hello to my) is not 'please'
-                is_descending = (has_right and r_dy > 0.06 and r_speed > 0.10) or (has_left and l_dy > 0.06 and l_speed > 0.10)
-                is_lateral_rub = (has_right and abs(r_dx) > 0.04) or (has_left and abs(l_dx) > 0.04)
 
-                if best_word.lower() == "please" and is_descending and not is_lateral_rub:
-                    # Ignore downward transit glitch for please
-                    if len(all_candidates) > 1 and all_candidates[1][0].lower() != "please":
-                        best_word, best_prob = all_candidates[1]
-                    else:
-                        return []
 
                 # 50-Class dominant confidence commit:
                 # With 50 classes, uniform random baseline is 2.0% (1/50). Any dominant sign above 35%-40%
@@ -524,6 +516,7 @@ class VisionStream:
         self.last_gesture_time: float | None = None
         self.last_commit_time: float = 0.0
         self.locked_token: str | None = None
+        self.idle_frames: int = 0
 
         self.flash_text = ""
         self.flash_until = 0.0
@@ -572,6 +565,7 @@ class VisionStream:
         self.last_gesture_time = None
         self.last_commit_time = 0.0
         self.locked_token = None
+        self.idle_frames = 0
         self.flash_text = ""
         self.flash_until = 0.0
 
@@ -677,6 +671,10 @@ class VisionStream:
         self.last_gesture_time = now
         self.last_commit_time = now
         self.locked_token = token
+
+        # Reset engine sequence buffers so the next gesture starts with 100% clean, uncontaminated frames
+        self.engine.reset()
+        self.stability_window.clear()
 
         sentence_text = self._format_sentence()
         print(f"[SUBTITLE STREAM]: + '{token}' -> \"{sentence_text}\"")
@@ -848,32 +846,35 @@ class VisionStream:
                                 event_type = "gesture"
                                 self.stability_window.append(best_token)
 
-                                # Require agreement across HOLD_REQUIRED_FRAMES (2 frames = ~0.05s instant commit)
+                                # Require agreement across HOLD_REQUIRED_FRAMES (3 frames = ~0.09s snappy commit)
                                 if len(self.stability_window) >= HOLD_REQUIRED_FRAMES:
                                     most_common, count = Counter(self.stability_window).most_common(1)[0]
                                     if count >= HOLD_REQUIRED_FRAMES and most_common is not None:
                                         if self.locked_token != most_common:
                                             self._commit_token(most_common, best_conf, now)
-                                            self.stability_window.clear()
                             else:
                                 self.stability_window.append(None)
-                                if all(x is None for x in self.stability_window):
-                                    self.locked_token = None
                         else:
                             self.stability_window.append(None)
-                            if all(x is None for x in self.stability_window):
-                                self.locked_token = None
                             gesture_display = "..."
                     else:
                         self.engine.reset()
                         self.stability_window.clear()
-                        self.locked_token = None
                         gesture_display = "..."
                 else:
                     self.engine.reset()
                     self.stability_window.clear()
-                    self.locked_token = None
                     gesture_display = "..."
+
+                # Robust gesture anti-spam lock:
+                # Do NOT unlock locked_token just because of 1-2 frames of transient noise!
+                # Only unlock if hands have dropped below active space or are absent for >= 10 frames (~0.3s)
+                if not r_active and not l_active:
+                    self.idle_frames += 1
+                    if self.idle_frames >= 10:
+                        self.locked_token = None
+                else:
+                    self.idle_frames = 0
 
                 # Auto-flush complete sentence after comfortable natural pause (3.5s)
                 if (
